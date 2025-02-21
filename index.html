@@ -1,2 +1,232 @@
-git rm --cached file1.txt
-git commit -m "remove file1.txt"
+<html lang="en">
+    <head>
+        <style>
+            :root {
+                --primary: #ff4444;
+                --bg: #1a1a1a;
+            }
+    
+            * {
+                box-sizing: border-box;
+                font-family: -apple-system, sans-serif;
+            }
+    
+            body {
+                margin: 0;
+                padding: 10px;
+                background: var(--bg);
+                color: white;
+                height: 100vh;
+                overflow: hidden;
+            }
+    
+            .container {
+                display: grid;
+                grid-template-rows: auto 1fr auto;
+                height: 100%;
+                gap: 10px;
+            }
+    
+            #videoFeed {
+                width: 100%;
+                border-radius: 12px;
+                transform: scaleX(-1);
+                background: black;
+            }
+    
+            .stats {
+                background: #2a2a2a;
+                padding: 15px;
+                border-radius: 12px;
+                font-size: 14px;
+            }
+    
+            .log {
+                background: #2a2a2a;
+                padding: 15px;
+                border-radius: 12px;
+                overflow-y: auto;
+                max-height: 150px;
+                font-size: 12px;
+            }
+    
+            .pulse-indicator {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                background: var(--primary);
+                animation: pulse 1s infinite;
+            }
+    
+            @keyframes pulse {
+                0% { transform: scale(0.9); opacity: 0.7; }
+                50% { transform: scale(1.1); opacity: 1; }
+                100% { transform: scale(0.9); opacity: 0.7; }
+            }
+        </style>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>PyScript!</title>
+        <link
+            rel="stylesheet"
+            href="https://pyscript.net/snapshots/2024.9.2/core.css"
+        />
+        <script
+            type="module"
+            src="https://pyscript.net/snapshots/2024.9.2/core.js"
+        ></script>
+    </head>
+    <body>
+        <!-- Use MicroPython to evaluate some Python -->
+        <script type="mpy" terminal>
+            import cv2
+            import numpy as np
+            import time
+            from collections import deque
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+               print("Error: Could not open video source")
+               exit()
+
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            cap.set(cv2.CAP_PROP_EXPOSURE, -3)
+            cap.set(cv2.CAP_PROP_GAIN, 4)
+
+            BACKGROUND_BUFFER_SIZE = 30
+            MIN_PULSE_CONTRAST = 1.8
+            MIN_AREA = 5
+            DOWNSAMPLE_FACTOR = 2
+            GAUSSIAN_BLUR = (9,9)
+            NMS_THRESHOLD = 0.3
+
+            background_buffer = deque(maxlen=BACKGROUND_BUFFER_SIZE)
+            current_background = 0
+
+            def enhance_signal(frame):
+                small_frame = cv2.resize(frame, (0,0), fx=1/DOWNSAMPLE_FACTOR, fy=1/DOWNSAMPLE_FACTOR)
+                lab = cv2.cvtColor(small_frame, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                l = clahe.apply(l)
+                enhanced = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
+                return cv2.resize(enhanced, (frame.shape[1], frame.shape[0]))
+
+            def adaptive_processing(frame):
+              enhanced = enhance_signal(frame)
+              gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+              blurred = cv2.GaussianBlur(gray, GAUSSIAN_BLUR, 0)
+              avg_brightness = np.mean(blurred)
+              background_buffer.append(avg_brightness)
+              current_background = np.median(background_buffer)
+              threshold = max(10, current_background * MIN_PULSE_CONTRAST)
+              return blurred, threshold
+
+            def detect_distant_pulse(frame):
+             processed, threshold = adaptive_processing(frame)
+             _, thresh = cv2.threshold(processed, threshold, 255, cv2.THRESH_BINARY)
+             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+                cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+                contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+             if not contours:
+                return False, (0,0,0)
+    
+             contours = sorted(contours, key=cv2.contourArea, reverse=True)[:3]
+             main_contour = max(contours, key=lambda c: cv2.contourArea(c) * (1/NMS_THRESHOLD))
+            
+             if cv2.contourArea(main_contour) > MIN_AREA:
+                   mask = np.zeros_like(cleaned)
+                   cv2.drawContours(mask, [main_contour], -1, 255, -1)
+                   pulse_pixels = frame[mask == 255]
+                   avg_bgr = np.mean(pulse_pixels, axis=0)
+                   rgb = tuple(np.clip(avg_bgr[::-1], 0, 255).astype(int))
+                   rgb = tuple(0 if c < 20 else c for c in rgb)
+        
+                   if all(c <= 25 for c in rgb):
+                       return False, (0, 0, 0)
+                   return True, rgb
+    
+             return False, (0,0,0)
+
+            pulse_data = []
+            pulse_start_time = None
+            is_pulse_active = False
+            current_rgb = (0, 0, 0)
+            previous_pulse = False
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+             # Detect pulse
+             pulse_detected, rgb = detect_distant_pulse(frame)
+             current_time = time.time()
+    
+             # Pulse timing logic
+             if pulse_detected and not previous_pulse:  # Rising edge
+                 pulse_start_time = current_time
+                 current_rgb = rgb
+                 is_pulse_active = True
+        
+             elif not pulse_detected and previous_pulse:  # Falling edge
+                  duration = current_time - pulse_start_time
+                  pulse_data.append({
+                      "start": pulse_start_time,
+                      "duration": duration,
+                      "rgb": current_rgb
+                  })
+                    is_pulse_active = False
+    
+             previous_pulse = pulse_detected
+    
+             # Display
+                 status_text = []
+                 if is_pulse_active:
+                   current_duration = current_time - pulse_start_time
+                   status_text.append(f"ACTIVE PULSE: {current_duration:.3f}s")
+                   status_text.append(f"RGB: {current_rgb}")
+                elif pulse_data:
+                    status_text.append(f"Last duration: {pulse_data[-1]['duration']:.3f}s")
+             else:
+                 status_text.append("No pulses detected")
+    
+             for i, text in enumerate(status_text):
+                 cv2.putText(frame, text, (10, 30 + i*30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+                            (0,255,0) if is_pulse_active else (0,0,255), 2)
+    
+                cv2.imshow('Pulse Duration Measurement', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                   break
+
+            if is_pulse_active:
+             duration = time.time() - pulse_start_time
+                pulse_data.append({
+                    "start": pulse_start_time,
+                  "duration": duration,
+                   "rgb": current_rgb
+                })
+
+            cap.release()
+            cv2.destroyAllWindows()
+
+            print("\n=== Pulse Duration Report ===")
+            print(f"Total pulses detected: {len(pulse_data)}")
+            if pulse_data:
+                print("\nPulse Details:")
+                for idx, p in enumerate(pulse_data, 1):
+                    print(f"Pulse {idx}:")
+                    print(f"  Start Time: {p['start']:.3f}s")
+                    print(f"  Duration: {p['duration']:.3f}s")
+                    print(f"  RGB: {p['rgb']}\n")
+    
+                durations = [p['duration'] for p in pulse_data]
+                print(f"Average duration: {np.mean(durations):.3f}s")
+                print(f"Minimum duration: {np.min(durations):.3f}s")
+                print(f"Maximum duration: {np.max(durations):.3f}s")
+        </script>
+    </body>
+</html>
